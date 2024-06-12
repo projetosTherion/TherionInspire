@@ -3,6 +3,12 @@ import os
 
 import folder_paths
 import nodes
+import torch
+from comfy_extras.chainner_models import model_loading
+from comfy import model_management
+import comfy.utils
+import comfy.controlnet
+import comfy.clip_vision
 from server import PromptServer
 
 from .libs.utils import TaggedCache, any_typ
@@ -336,6 +342,9 @@ class ShowCachedInfo:
         return float("NaN")
 
 
+
+
+
 class CheckpointLoaderSimpleShared(nodes.CheckpointLoaderSimple):
     @classmethod
     def INPUT_TYPES(s):
@@ -398,6 +407,9 @@ class CheckpointLoaderSimpleShared(nodes.CheckpointLoaderSimple):
             return (ckpt_name, key)
 
         return (None, cache_weak_hash(key))
+
+
+
 
 
 class StableCascade_CheckpointLoader:
@@ -478,6 +490,223 @@ class StableCascade_CheckpointLoader:
         return b_model, b_vae, c_model, c_vae, clip_vision, clip, key_b, key_c
 
 
+
+class UpscaleLoaderSimpleShared:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "model_name": (folder_paths.get_filename_list("upscale_models"), ),
+                    "key_opt_u": ("STRING", {"multiline": False, "placeholder": "If empty, use 'model_name' as the key_u."}),
+                },
+                "optional": {
+                    "mode": (['Auto', 'Override Cache', 'Read Only'],),
+                }}
+
+    RETURN_TYPES = ("UPSCALE_MODEL", "STRING")
+    RETURN_NAMES = ("upscale_model", "cache key")
+    FUNCTION = "doitup"
+
+    CATEGORY = "InspirePack/Backend"
+
+    def load_model(self, model_name):
+        model_path = folder_paths.get_full_path("upscale_models", model_name)
+        sd = comfy.utils.load_torch_file(model_path, safe_load=True)
+        if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
+            sd = comfy.utils.state_dict_prefix_replace(sd, {"module.":""})
+        out = model_loading.load_state_dict(sd).eval()
+        return out
+
+
+    def doitup(self, model_name, key_opt_u, mode='Auto'):
+        if mode == 'Read Only':
+            if key_opt_u.strip() == '':
+                raise Exception("[UpscaleLoaderSimpleShared] key_opt_u cannot be omit if mode is 'Read Only'")
+            key_u = key_opt_u.strip()
+        elif key_opt_u.strip() == '':
+            key_u = model_name
+        else:
+            key_u = key_opt_u.strip()
+
+        if key_u not in cache or mode == 'Override Cache':
+            res = self.load_model(model_name)
+            update_cache(key_u, "model", (False, res))
+            cache_kind = 'model'
+            print(f"[Inspire Pack] UpscaleLoaderSimpleShared: Model '{model_name}' is cached to '{key_u}'.")
+        else:
+            cache_kind, (_, res) = cache[key_u]
+            print(f"[Inspire Pack] UpscaleLoaderSimpleShared: Cached model '{key_u}' is loaded. (Loading skip)")
+
+        if cache_kind == 'model':
+            upscale_model = res
+        elif cache_kind == 'unclip_model':
+            upscale_model, _ = res
+        else:
+            raise Exception(f"[UpscaleLoaderSimpleShared] Unexpected cache_kind '{cache_kind}'")
+
+        return upscale_model, upscale_model
+
+    @staticmethod
+    def IS_CHANGED(model_name, key_opt_u, mode='Auto'):
+        if mode == 'Read Only':
+            if key_opt_u.strip() == '':
+                raise Exception("[UpscaleLoaderSimpleShared] key_opt_u cannot be omit if mode is 'Read Only'")
+            key_u = key_opt_u.strip()
+        elif key_opt_u.strip() == '':
+            key_u = model_name
+        else:
+            key_u = key_opt_u.strip()
+
+        if mode == 'Read Only':
+            return (None, cache_weak_hash(key_u))
+        elif mode == 'Override Cache':
+            return (model_name, key_u)
+
+        return (None, cache_weak_hash(key_u))
+
+
+class ControlnetLoaderSimpleShared:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "control_net_name": (folder_paths.get_filename_list("controlnet"), ),
+                    "key_opt_cn": ("STRING", {"multiline": False, "placeholder": "If empty, use 'model_name' as the key_cn."}),
+                },
+                "optional": {
+                    "mode": (['Auto', 'Override Cache', 'Read Only'],),
+                }}
+
+    RETURN_TYPES = ("CONTROL_NET", "STRING")
+    RETURN_NAMES = ("Controlnet", "cache key")
+    FUNCTION = "doitcn"
+
+    CATEGORY = "InspirePack/Backend"
+    
+    
+    def load_controlnet(self, control_net_name):
+        controlnet_path = folder_paths.get_full_path("controlnet", control_net_name)
+        controlnet = comfy.controlnet.load_controlnet(controlnet_path)
+        return controlnet
+
+
+    def doitcn(self, control_net_name, key_opt_cn, mode='Auto'):
+        if mode == 'Read Only':
+            if key_opt_cn.strip() == '':
+                raise Exception("[ControlnetLoaderSimpleShared] key_opt_cn cannot be omit if mode is 'Read Only'")
+            key_cn = key_opt_cn.strip()
+        elif key_opt_cn.strip() == '':
+            key_cn = control_net_name
+        else:
+            key_cn = key_opt_cn.strip()
+
+        if key_cn not in cache or mode == 'Override Cache':
+            res = self.load_controlnet(control_net_name)
+            update_cache(key_cn, "controlnet", (False, res))
+            cache_kind = 'controlnet'
+            print(f"[Inspire Pack] ControlnetLoaderSimpleShared: Model '{control_net_name}' is cached to '{key_cn}'.")
+        else:
+            cache_kind, (_, res) = cache[key_cn]
+            print(f"[Inspire Pack] ControlnetLoaderSimpleShared: Cached model '{key_cn}' is loaded. (Loading skip)")
+
+        if cache_kind == 'controlnet':
+            controlnet_model = res
+        elif cache_kind == 'unclip_controlnet':
+            controlnet_model, _ = res
+        else:
+            raise Exception(f"[ControlnetLoaderSimpleShared] Unexpected cache_kind '{cache_kind}'")
+
+        return controlnet_model, controlnet_model
+
+    @staticmethod
+    def IS_CHANGED(control_net_name, key_opt_cn, mode='Auto'):
+        if mode == 'Read Only':
+            if key_opt_cn.strip() == '':
+                raise Exception("[ControlnetLoaderSimpleShared] key_opt_cn cannot be omit if mode is 'Read Only'")
+            key_cn = key_opt_cn.strip()
+        elif key_opt_cn.strip() == '':
+            key_cn = control_net_name
+        else:
+            key_cn = key_opt_cn.strip()
+
+        if mode == 'Read Only':
+            return (None, cache_weak_hash(key_cn))
+        elif mode == 'Override Cache':
+            return (control_net_name, key_cn)
+
+        return (None, cache_weak_hash(key_cn))
+        
+        
+        
+class CLIPVisionLoaderSimpleShared:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "clip_name": (folder_paths.get_filename_list("clip_vision"), ),
+                    "key_opt_cv": ("STRING", {"multiline": False, "placeholder": "If empty, use 'model_name' as the key_cv."}),
+                },
+                "optional": {
+                    "mode": (['Auto', 'Override Cache', 'Read Only'],),
+                }}
+
+    RETURN_TYPES = ("CLIP_VISION", "STRING")
+    RETURN_NAMES = ("load_clip", "cache key")
+    FUNCTION = "doitcv"
+
+    CATEGORY = "InspirePack/Backend"
+    
+    
+    def load_clip(self, clip_name):
+        clip_path = folder_paths.get_full_path("clip_vision", clip_name)
+        clip_vision = comfy.clip_vision.load(clip_path)
+        return clip_vision
+
+
+    def doitcv(self, clip_name, key_opt_cv, mode='Auto'):
+        if mode == 'Read Only':
+            if key_opt_cv.strip() == '':
+                raise Exception("[CLIPVisionLoaderSimpleShared] key_opt_cv cannot be omit if mode is 'Read Only'")
+            key_cv = key_opt_cv.strip()
+        elif key_opt_cv.strip() == '':
+            key_cv = clip_name
+        else:
+            key_cv = key_opt_cv.strip()
+
+        if key_cv not in cache or mode == 'Override Cache':
+            res = self.load_clip(clip_name)
+            update_cache(key_cv, "clip", (False, res))
+            cache_kind = 'clip'
+            print(f"[Inspire Pack] CLIPVisionLoaderSimpleShared: Model '{clip_name}' is cached to '{key_cv}'.")
+        else:
+            cache_kind, (_, res) = cache[key_cv]
+            print(f"[Inspire Pack] CLIPVisionLoaderSimpleShared: Cached model '{key_cv}' is loaded. (Loading skip)")
+
+        if cache_kind == 'clip':
+            clip_model = res
+        elif cache_kind == 'unclip_clip':
+            clip_model, _ = res
+        else:
+            raise Exception(f"[CLIPVisionLoaderSimpleShared] Unexpected cache_kind '{cache_kind}'")
+
+        return clip_model, clip_model
+
+    @staticmethod
+    def IS_CHANGED(clip_name, key_opt_cv, mode='Auto'):
+        if mode == 'Read Only':
+            if key_opt_cv.strip() == '':
+                raise Exception("[CLIPVisionLoaderSimpleShared] key_opt_cv cannot be omit if mode is 'Read Only'")
+            key_cv = key_opt_cv.strip()
+        elif key_opt_cv.strip() == '':
+            key_cv = clip_name
+        else:
+            key_cv = key_opt_cv.strip()
+
+        if mode == 'Read Only':
+            return (None, cache_weak_hash(key_cv))
+        elif mode == 'Override Cache':
+            return (clip_name, key_cv)
+
+        return (None, cache_weak_hash(key_cv))
+
+
 NODE_CLASS_MAPPINGS = {
     "CacheBackendData //Inspire": CacheBackendData,
     "CacheBackendDataNumberKey //Inspire": CacheBackendDataNumberKey,
@@ -489,7 +718,11 @@ NODE_CLASS_MAPPINGS = {
     "RemoveBackendDataNumberKey //Inspire": RemoveBackendDataNumberKey,
     "ShowCachedInfo //Inspire": ShowCachedInfo,
     "CheckpointLoaderSimpleShared //Inspire": CheckpointLoaderSimpleShared,
-    "StableCascade_CheckpointLoader //Inspire": StableCascade_CheckpointLoader
+    "StableCascade_CheckpointLoader //Inspire": StableCascade_CheckpointLoader,
+    "UpscaleLoaderSimpleShared //Inspire": UpscaleLoaderSimpleShared,
+    "ControlnetLoaderSimpleShared //Inspire": ControlnetLoaderSimpleShared,
+    "CLIPVisionLoaderSimpleShared //Inspire": CLIPVisionLoaderSimpleShared
+
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -503,5 +736,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RemoveBackendDataNumberKey //Inspire": "Remove Backend Data [NumberKey] (Inspire)",
     "ShowCachedInfo //Inspire": "Show Cached Info (Inspire)",
     "CheckpointLoaderSimpleShared //Inspire": "Shared Checkpoint Loader (Inspire)",
-    "StableCascade_CheckpointLoader //Inspire": "Stable Cascade Checkpoint Loader (Inspire)"
+    "StableCascade_CheckpointLoader //Inspire": "Stable Cascade Checkpoint Loader (Inspire)",
+    "UpscaleLoaderSimpleShared //Inspire": "Shared Upscale Loader (Inspire)",
+    "ControlnetLoaderSimpleShared //Inspire": "Shared CN Loader (Inspire)",
+    "CLIPVisionLoaderSimpleShared //Inspire": "Shared Clip Loader (Inspire)"
+
 }
